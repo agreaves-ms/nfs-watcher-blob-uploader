@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir --target=/deps .
 FROM python:3.12-slim-bookworm
 WORKDIR /app
 COPY --from=deps /deps /usr/local/lib/python3.12/site-packages
+COPY --from=deps /deps/bin /usr/local/bin
 COPY app/ ./app/
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000

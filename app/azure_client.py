@@ -31,11 +31,19 @@ async def create_azure_client(
     if settings.azure_max_single_put_size is not None:
         kwargs["max_single_put_size"] = settings.azure_max_single_put_size
 
-    blob_service_client = BlobServiceClient(
-        account_url=settings.azure_account_url,
-        credential=credential,
-        **kwargs,
-    )
+    try:
+        blob_service_client = BlobServiceClient(
+            account_url=settings.azure_account_url,
+            credential=credential,
+            **kwargs,
+        )
+    except ValueError:
+        logger.warning(
+            "DefaultAzureCredential rejected (HTTP endpoint), attempting fallback auth"
+        )
+        await credential.close()
+        blob_service_client, container_client = await _try_fallback(settings, kwargs)
+        return blob_service_client, container_client, None
 
     container_client = blob_service_client.get_container_client(
         settings.azure_container

@@ -6,11 +6,7 @@ services:
     environment:
       APP_AZURE_ACCOUNT_URL: http://azurite:10000/devstoreaccount1
       APP_AZURE_CONTAINER: ingest
-      APP_AZURE_CONNECTION_STRING: >-
-        DefaultEndpointsProtocol=http;
-        AccountName=devstoreaccount1;
-        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;
-        BlobEndpoint=http://azurite:10000/devstoreaccount1;
+      APP_AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
       APP_NFS_INCOMING_DIR: /mnt/nfs/incoming
       APP_NFS_PROCESSING_ROOT: /mnt/nfs/.processing
       APP_LOCAL_STAGING_ROOT: /mnt/staging
@@ -20,8 +16,7 @@ services:
       OTEL_SERVICE_NAME: nfs-watcher-uploader
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     volumes:
-      - ./data/incoming:/mnt/nfs/incoming
-      - ./data/.processing:/mnt/nfs/.processing
+      - ./data/nfs:/mnt/nfs
       - staging:/mnt/staging
     depends_on:
       - azurite
@@ -35,7 +30,7 @@ services:
       - "10002:10002"
     volumes:
       - azurite-data:/data
-    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --skipApiVersionCheck
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib
@@ -45,6 +40,15 @@ services:
     command: ["--config=/etc/otelcol/config.yaml"]
     volumes:
       - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+
+  test-nfs:
+    build: ./test-nfs
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/nfs/incoming:/mnt/nfs/incoming
+    depends_on:
+      - app
 
 volumes:
   azurite-data:
