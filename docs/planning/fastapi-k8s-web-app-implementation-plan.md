@@ -39,6 +39,12 @@ app/
   telemetry.py           # OTel setup: traces, metrics, structured logging
 pyproject.toml
 Dockerfile
+Makefile                 # Development commands
+.gitignore
+.env.example             # Template env vars for local development
+docker-compose.yaml      # Full stack: app + Azurite + OTel Collector
+docker-compose.dev.yaml  # Dependencies only: Azurite + OTel Collector
+otel-collector-config.yaml  # OTel Collector config (debug exporter)
 k8s/
   deployment.yaml
   pv-nfs.yaml
@@ -53,9 +59,11 @@ k8s/
 
 ### Files
 
-- [ ] `pyproject.toml` — project metadata, dependencies, entry point
+- [ ] `pyproject.toml` — project metadata, dependencies, dev dependencies, entry point
 - [ ] `app/__init__.py` — empty
 - [ ] `Dockerfile` — multi-stage build targeting `linux/arm64`
+- [ ] `.gitignore` — Python, IDE, project-specific ignores
+- [ ] `.env.example` — template env vars for local development
 
 ### Details
 
@@ -466,6 +474,96 @@ See [details §12](./fastapi-k8s-web-app-implementation-details.md#12-kubernetes
 
 ---
 
+## Phase 13: Development Infrastructure
+
+**Goal**: Local development workflow with Azurite blob emulator, OTel
+Collector, Makefile commands, and Docker Compose for full-stack testing.
+
+### Files
+
+- [ ] `Makefile` — common development commands
+- [ ] `docker-compose.yaml` — full stack (app + Azurite + OTel Collector)
+- [ ] `docker-compose.dev.yaml` — dependencies only (Azurite + OTel Collector)
+- [ ] `otel-collector-config.yaml` — OTel Collector pipeline config
+
+### Design
+
+Three local execution modes, from simplest to most production-like:
+
+#### Mode 1: Host-only (fastest iteration)
+
+Run the app directly on the host with `uvicorn`. Azurite and OTel Collector
+run in Docker via `docker-compose.dev.yaml`. NFS is simulated with local
+directories (`./data/incoming`, `./data/.processing`, `./data/staging`).
+
+```
+make dev-up      # Start Azurite + OTel Collector
+make run         # Run app with uvicorn (auto-reload)
+make dev-down    # Stop dependencies
+```
+
+#### Mode 2: Docker Compose full stack
+
+All services (app, Azurite, OTel Collector) in containers. NFS simulated
+with bind-mounted `./data/` directory. Closest to production without k3s.
+
+```
+make docker-up   # Build + start all containers
+make docker-down # Stop all containers
+```
+
+#### Mode 3: k3s local cluster
+
+Deploy to a local k3s cluster using the k8s manifests from Phase 12.
+Most production-like. Requires k3s and a real or simulated NFS server.
+
+```
+make k3s-apply   # Apply k8s manifests to local k3s
+make k3s-delete  # Remove from k3s
+```
+
+#### Azurite (Azure Storage Emulator)
+
+- Image: `mcr.microsoft.com/azure-storage/azurite`
+- Ports: `10000` (Blob), `10001` (Queue), `10002` (Table)
+- Well-known connection string for local auth (no DefaultAzureCredential)
+- Account name: `devstoreaccount1`
+- Persistent data via named volume
+
+#### OTel Collector (optional)
+
+- Image: `otel/opentelemetry-collector-contrib`
+- Receives OTLP on `4317` (gRPC) and `4318` (HTTP)
+- Exports to console/debug by default (no external backend required)
+- Can be omitted for development by not setting `OTEL_EXPORTER_OTLP_ENDPOINT`
+
+#### Makefile commands
+
+| Command | Description |
+|---------|-------------|
+| `make install` | Install project + dev dependencies in editable mode |
+| `make run` | Run app locally with uvicorn (auto-reload) |
+| `make dev-up` | Start Azurite + OTel Collector containers |
+| `make dev-down` | Stop dev dependency containers |
+| `make docker-up` | Build and start full stack via Docker Compose |
+| `make docker-down` | Stop full stack |
+| `make docker-build` | Build the app Docker image |
+| `make lint` | Run ruff linter |
+| `make format` | Run ruff formatter |
+| `make typecheck` | Run pyright type checker |
+| `make clean` | Remove local data directories and caches |
+
+#### `.env.example`
+
+Template for local development. Copied to `.env` and loaded by
+`pydantic-settings` (and Docker Compose). Points at Azurite via the
+well-known connection string and uses local filesystem paths instead of
+NFS mounts.
+
+See [details §13](./fastapi-k8s-web-app-implementation-details.md#13-development-infrastructure).
+
+---
+
 ## Resolved Design Gaps
 
 Issues identified during plan creation that were not fully addressed in prior
@@ -543,11 +641,11 @@ If no fallback exists or the fallback also fails, `raise SystemExit`.
 ## Dependency Graph
 
 ```
-Phase 1: Scaffolding
-  │
-  ▼
-Phase 2: Configuration ──────────────────────┐
-  │                                           │
+Phase 1: Scaffolding ──────────────────────────────────────┐
+  │                                                         │
+  ▼                                                         ▼
+Phase 2: Configuration ──────────────────────┐    Phase 13: Dev Infrastructure
+  │                                           │    (parallel, no app code deps)
   ▼                                           │
 Phase 3: Models ──────────┐                   │
   │                       │                   │
@@ -576,6 +674,7 @@ Phase 4: Telemetry    Phase 5: Azure    Phase 6: Session
 ```
 
 Phases 4, 5, and 6 can be implemented in parallel once Phases 2–3 are done.
+Phase 13 can be implemented in parallel with any phase after Phase 1.
 
 ---
 

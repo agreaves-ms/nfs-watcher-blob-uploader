@@ -35,6 +35,70 @@ dependencies = [
 
 [project.scripts]
 nfs-watcher-uploader = "app.main:run"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+    "pyright>=1.1.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+```
+
+### .gitignore
+
+```gitignore
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Local dev data directories
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+```
+
+### .env.example
+
+```bash
+# Azure — uses Azurite emulator locally
+APP_AZURE_ACCOUNT_URL=http://127.0.0.1:10000/devstoreaccount1
+APP_AZURE_CONTAINER=ingest
+APP_AZURE_CONNECTION_STRING=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;
+
+# NFS — local directories for development
+APP_NFS_INCOMING_DIR=./data/incoming
+APP_NFS_PROCESSING_ROOT=./data/.processing
+APP_LOCAL_STAGING_ROOT=./data/staging
+
+# Watcher tuning — faster for dev
+APP_POLL_INTERVAL_S=1.0
+APP_MIN_FILE_AGE_S=2.0
+
+# Workers
+APP_WORKER_CONCURRENCY=2
+
+# OTel — comment out to disable telemetry
+# OTEL_SERVICE_NAME=nfs-watcher-uploader
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 ```
 
 ### Dockerfile
@@ -1172,3 +1236,289 @@ BENIGN_ERRNOS = {errno.ENOENT, errno.ESTALE}
 Both `ENOENT` and `ESTALE` are treated identically throughout the codebase:
 the file is gone (either deleted, renamed, or NFS handle is stale). In all
 cases, the correct action is to skip the file.
+
+---
+
+## 13. Development Infrastructure
+
+### Makefile
+
+```makefile
+.PHONY: install run dev-up dev-down docker-up docker-down docker-build \
+        lint format typecheck clean k3s-apply k3s-delete
+
+# --- Setup ---
+
+install:
+	pip install -e ".[dev]"
+
+# --- Local development (app on host, deps in Docker) ---
+
+run:
+	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+dev-up:
+	docker compose -f docker-compose.dev.yaml up -d
+
+dev-down:
+	docker compose -f docker-compose.dev.yaml down
+
+# --- Docker Compose full stack ---
+
+docker-build:
+	docker build -t nfs-watcher-uploader:latest .
+
+docker-up: docker-build
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+# --- Code quality ---
+
+lint:
+	ruff check app/
+
+format:
+	ruff format app/
+
+typecheck:
+	pyright app/
+
+# --- k3s ---
+
+k3s-apply:
+	kubectl apply -f k8s/
+
+k3s-delete:
+	kubectl delete -f k8s/
+
+# --- Cleanup ---
+
+clean:
+	rm -rf data/ __pycache__ .ruff_cache .pyright
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+```
+
+### docker-compose.dev.yaml
+
+Dependencies only — the app runs on the host. Used with `make dev-up`.
+
+```yaml
+services:
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    ports:
+      - "10000:10000"   # Blob
+      - "10001:10001"   # Queue
+      - "10002:10002"   # Table
+    volumes:
+      - azurite-data:/data
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    ports:
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+
+volumes:
+  azurite-data:
+```
+
+### docker-compose.yaml
+
+Full stack — app, Azurite, OTel Collector all in containers. Used with
+`make docker-up`.
+
+```yaml
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      APP_AZURE_ACCOUNT_URL: http://azurite:10000/devstoreaccount1
+      APP_AZURE_CONTAINER: ingest
+      APP_AZURE_CONNECTION_STRING: >-
+        DefaultEndpointsProtocol=http;
+        AccountName=devstoreaccount1;
+        AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;
+        BlobEndpoint=http://azurite:10000/devstoreaccount1;
+      APP_NFS_INCOMING_DIR: /mnt/nfs/incoming
+      APP_NFS_PROCESSING_ROOT: /mnt/nfs/.processing
+      APP_LOCAL_STAGING_ROOT: /mnt/staging
+      APP_POLL_INTERVAL_S: "1.0"
+      APP_MIN_FILE_AGE_S: "2.0"
+      APP_WORKER_CONCURRENCY: "2"
+      OTEL_SERVICE_NAME: nfs-watcher-uploader
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    volumes:
+      - ./data/incoming:/mnt/nfs/incoming
+      - ./data/.processing:/mnt/nfs/.processing
+      - staging:/mnt/staging
+    depends_on:
+      - azurite
+      - otel-collector
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    ports:
+      - "10000:10000"
+      - "10001:10001"
+      - "10002:10002"
+    volumes:
+      - azurite-data:/data
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+
+volumes:
+  azurite-data:
+  staging:
+```
+
+### otel-collector-config.yaml
+
+Minimal OTel Collector config that logs everything to the console. Replace
+exporters with real backends (Jaeger, Prometheus, etc.) when needed.
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+```
+
+### Azurite connection details
+
+| Property | Value |
+|----------|-------|
+| Account name | `devstoreaccount1` |
+| Account key | `Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==` |
+| Blob endpoint (host) | `http://127.0.0.1:10000/devstoreaccount1` |
+| Blob endpoint (Docker) | `http://azurite:10000/devstoreaccount1` |
+| Connection string | See `.env.example` |
+
+Azurite supports all Blob Storage APIs used by this service: `Put Blob`,
+`Put Block`, `Put Block List`, `Get Container Properties`,
+`Create Container`. The well-known account key is public and hardcoded
+in Azurite — it is not a secret.
+
+### Local development workflow
+
+**First-time setup**:
+
+```bash
+# Clone and install
+git clone <repo>
+cd nfs-watcher-uploader
+python -m venv .venv
+source .venv/bin/activate
+make install
+
+# Copy env template
+cp .env.example .env
+
+# Create local data directories
+mkdir -p data/incoming data/.processing data/staging
+```
+
+**Daily workflow**:
+
+```bash
+# Start Azurite
+make dev-up
+
+# Run the app (auto-reload on code changes)
+make run
+
+# In another terminal — start a session and drop test files
+curl -X POST http://localhost:8000/v1/watch/start \
+  -H 'Content-Type: application/json' \
+  -d '{"session_name": "test-session"}'
+
+# Copy test files into the watched directory
+cp /path/to/testfile.bin data/incoming/test-session/
+
+# Check status
+curl http://localhost:8000/v1/status
+
+# Verify upload in Azurite (using Azure CLI)
+az storage blob list \
+  --connection-string "$(grep APP_AZURE_CONNECTION_STRING .env | cut -d= -f2-)" \
+  --container-name ingest \
+  --output table
+
+# Stop
+curl -X POST http://localhost:8000/v1/watch/stop
+make dev-down
+```
+
+**Full stack (Docker Compose)**:
+
+```bash
+# Start everything in containers
+make docker-up
+
+# The app is at http://localhost:8000
+# Same curl commands as above
+
+# View logs
+docker compose logs -f app
+
+# Stop
+make docker-down
+```
+
+### NFS simulation notes
+
+For local development, the NFS mount is replaced with local directories:
+
+- `./data/incoming/` → `APP_NFS_INCOMING_DIR`
+- `./data/.processing/` → `APP_NFS_PROCESSING_ROOT`
+- `./data/staging/` → `APP_LOCAL_STAGING_ROOT`
+
+`os.rename()` across these directories works identically to NFS (same
+filesystem). The stability detection (`min_file_age_s`) still applies —
+files must be older than the threshold and match in two consecutive scans.
+
+In Docker Compose full-stack mode, NFS directories are bind-mounted from
+the host's `./data/` into the container at `/mnt/nfs/`. The staging
+volume uses a Docker named volume (ephemeral, matching production's
+`emptyDir` behavior).

@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-watcher-uploader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfs-watcher-uploader
+  template:
+    metadata:
+      labels:
+        app: nfs-watcher-uploader
+    spec:
+      containers:
+        - name: uploader
+          image: nfs-watcher-uploader:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: APP_AZURE_ACCOUNT_URL
+              value: "https://<account>.blob.core.windows.net"
+            - name: APP_AZURE_CONTAINER
+              value: "ingest"
+            - name: OTEL_SERVICE_NAME
+              value: "nfs-watcher-uploader"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4318"
+          envFrom:
+            - secretRef:
+                name: azure-credentials
+                optional: true
+          volumeMounts:
+            - name: nfs-data
+              mountPath: /mnt/nfs
+            - name: staging
+              mountPath: /mnt/staging
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 2Gi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+              ephemeral-storage: 110Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        - name: nfs-data
+          persistentVolumeClaim:
+            claimName: nfs-data-pvc
+        - name: staging
+          emptyDir:
+            sizeLimit: 100Gi
